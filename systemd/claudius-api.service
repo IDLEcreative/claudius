@@ -1,0 +1,38 @@
+[Unit]
+Description=Claudius API Server
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/claudius
+ExecStart=/usr/bin/python3 /opt/claudius/api/claudius-api.py --port 3100
+
+# Restart policy (only restart on actual failures, with backoff)
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Resource limits (prevent OOM crashes and thread exhaustion)
+# MemoryHigh: Soft limit - start throttling at 800MB
+# MemoryMax: Hard limit - kill if exceeded at 1GB
+# MemorySwapMax: Disable swap
+# CPUQuota: Max 2 cores (200%)
+# LimitNOFILE: File descriptor limit (up from default 1024)
+# TasksMax: Prevent thread explosion
+MemoryHigh=800M
+MemoryMax=1G
+MemorySwapMax=0
+CPUQuota=200%
+LimitNOFILE=65536
+TasksMax=100
+
+# Environment configuration
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# Load secrets from Claudius env file
+EnvironmentFile=-/opt/claudius/.env
+
+[Install]
+WantedBy=multi-user.target
