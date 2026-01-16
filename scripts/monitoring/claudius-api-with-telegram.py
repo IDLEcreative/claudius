@@ -924,6 +924,9 @@ def memory_monitor_thread():
 # =============================================================================
 
 class ClaudiusHandler(BaseHTTPRequestHandler):
+    # Upgrade to HTTP/1.1 for keep-alive connections (reduces connection overhead)
+    protocol_version = "HTTP/1.1"
+
     ALLOWED_ORIGINS = ["http://172.18.0.1", "http://localhost", "http://127.0.0.1"]
 
     def log_message(self, format, *args):
@@ -950,13 +953,16 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
         return "http://172.18.0.1"
 
     def send_json(self, data, status=200):
+        response_body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response_body)))
+        self.send_header("Connection", "keep-alive")
         self.send_header("Access-Control-Allow-Origin", self.get_cors_origin())
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+        self.wfile.write(response_body)
 
     def do_OPTIONS(self):
         self.send_json({})

@@ -43,6 +43,19 @@ def can_spawn_fixer() -> tuple[bool, str]:
     import psutil
     import subprocess
 
+    # Clean up orphaned MCP processes first
+    try:
+        result = subprocess.run(
+            ["python3", "/opt/claudius/scripts/orphan-reaper.py"],
+            capture_output=True, text=True, timeout=30
+        )
+        if "Killed:" in result.stdout:
+            for line in result.stdout.split("\n"):
+                if "[REAPER]" in line:
+                    print(line)
+    except Exception as e:
+        print(f"[SPAWN] Reaper skipped: {e}")
+
     # Get current claude process count
     result = subprocess.run(
         ["pgrep", "-c", "-u", "claudius", "-f", "^claude"],
@@ -212,6 +225,7 @@ def spawn_claude_fixer(issue_type: str, issue_details: str, timeout: int = 600) 
             "claude",
             "--print",
             "--permission-mode", "bypassPermissions",
+            "--mcp-config", "/opt/claudius/.mcp-autofix.json",
             "--model", "opus",
             fix_prompt
         ]
