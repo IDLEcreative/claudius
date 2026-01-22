@@ -180,7 +180,8 @@ def refresh_token(creds: dict) -> str:
 
         creds["token"] = new_token
         creds["expiry"] = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
-        with open(CREDENTIALS_FILE, "w") as f:
+        fd = os.open(CREDENTIALS_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(creds, f, indent=2)
 
         return new_token
@@ -766,12 +767,37 @@ def action_telegram_alert(headers: dict, body: str, classification: EmailClassif
 # MAIN ROUTER
 # =============================================================================
 
+import fcntl
+_state_lock_fd = None
+
+
+def acquire_state_lock():
+    """Acquire exclusive file lock to prevent concurrent runs."""
+    global _state_lock_fd
+    lock_file = STATE_FILE + ".lock"
+    _state_lock_fd = open(lock_file, "w")
+    try:
+        fcntl.flock(_state_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("Another instance is already running. Exiting.")
+        sys.exit(0)
+
+
+def release_state_lock():
+    """Release the state file lock."""
+    global _state_lock_fd
+    if _state_lock_fd:
+        fcntl.flock(_state_lock_fd, fcntl.LOCK_UN)
+        _state_lock_fd.close()
+        _state_lock_fd = None
+
+
 def load_state() -> dict:
     """Load state file."""
     try:
         with open(STATE_FILE) as f:
             return json.load(f)
-    except:
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
         return {
             "last_check": None,
             "processed_ids": [],
@@ -780,10 +806,20 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    """Save state to file."""
+    """Save state to file atomically."""
+    import tempfile
     state["processed_ids"] = state["processed_ids"][-1000:]  # Keep last 1000
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(STATE_FILE), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_path, STATE_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def load_learned_senders() -> dict:
@@ -1101,9 +1137,10 @@ def process_push_notification(data: dict):
 
 
 def main():
-    import sys
-
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
+
+    # Acquire lock to prevent concurrent runs
+    acquire_state_lock()
 
     if "--test" in sys.argv:
         print("[Router] Test mode - checking recent emails...")

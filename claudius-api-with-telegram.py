@@ -37,6 +37,7 @@ import subprocess
 import os
 import re
 import time
+import hmac
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -918,14 +919,14 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
             return False
 
         token = auth_header[7:]
-        return token == CRON_SECRET
+        return hmac.compare_digest(token, CRON_SECRET)
 
     def get_cors_origin(self):
         origin = self.headers.get("Origin", "")
-        for allowed in self.ALLOWED_ORIGINS:
-            if origin.startswith(allowed):
-                return origin
-        return "http://172.18.0.1"
+        # Exact match only to prevent prefix attacks (e.g. localhost.evil.com)
+        if origin in self.ALLOWED_ORIGINS:
+            return origin
+        return None  # No CORS header if origin not allowed
 
     def send_json(self, data, status=200):
         response_body = json.dumps(data).encode()
@@ -933,9 +934,11 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(response_body)))
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", self.get_cors_origin())
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        cors_origin = self.get_cors_origin()
+        if cors_origin:
+            self.send_header("Access-Control-Allow-Origin", cors_origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
         self.wfile.write(response_body)
 
@@ -992,7 +995,10 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
                 "memory_threshold_mb": MEMORY_RESTART_THRESHOLD_MB
             })
         elif self.path == "/status":
-            # Show active sessions - no auth needed for quick checks
+            if not self.validate_auth():
+                # Unauthenticated: only expose basic status, not session details
+                self.send_json({"status": "ok", "claudius": True})
+                return
             pool_status = get_agent_pool().get_status()
             pool_status["status"] = "busy" if pool_status["active_sessions"] > 0 else "idle"
             self.send_json(pool_status)
@@ -1056,8 +1062,13 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
         else:
             self.send_json({"error": "Not found"}, 404)
 
+    MAX_BODY_SIZE = 1_048_576  # 1MB max request body
+
     def do_POST(self):
         content_length = int(self.headers.get("Content-Length", 0))
+        if content_length > self.MAX_BODY_SIZE:
+            self.send_json({"error": "Request body too large"}, 413)
+            return
         body = self.rfile.read(content_length).decode()
 
         try:

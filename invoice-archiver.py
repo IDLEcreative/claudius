@@ -143,7 +143,8 @@ def refresh_token(creds: dict) -> str:
 
         creds["token"] = new_token
         creds["expiry"] = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
-        with open(CREDENTIALS_FILE, "w") as f:
+        fd = os.open(CREDENTIALS_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(creds, f, indent=2)
 
         return new_token
