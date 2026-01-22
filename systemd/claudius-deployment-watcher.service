@@ -1,0 +1,22 @@
+[Unit]
+Description=Claudius Deployment Watcher
+Documentation=Watches Docker events for OmniOps deployments
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=claudius
+Group=claudius
+WorkingDirectory=/opt/claudius
+ExecStart=/usr/bin/python3 /opt/claudius/deployment-watcher.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
