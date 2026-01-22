@@ -34,6 +34,13 @@ API Endpoints:
                       Headers: Authorization: Bearer <CRON_SECRET>
                       Returns: {"memory": "..."}
 
+    Health Module Endpoints:
+    GET  /health/status         - Get current health summary
+    GET  /health/oauth/start    - Start Garmin OAuth flow
+    GET  /health/oauth/callback - Handle OAuth callback (with ?code=...)
+    POST /health/webhook        - Receive Garmin push notifications
+    POST /health/sync           - Trigger manual health data sync
+
 Authentication:
     All endpoints except /health require Bearer token authentication.
     CRON_SECRET - Required for Claudius auth
@@ -43,14 +50,27 @@ import json
 import subprocess
 import os
 import re
+import sys
 import urllib.request
 import urllib.error
+import urllib.parse
 import uuid
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import argparse
 import logging
 from logging.handlers import RotatingFileHandler
+
+# Add parent directory to path for health module import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Health module imports (lazy loaded to avoid startup failures)
+_health_module_loaded = False
+_health_context_generator = None
+_health_summary_getter = None
+_garmin_auth = None
+_webhook_handler = None
+_manual_sync_func = None
 
 # Configuration - updated paths for standalone repo
 CLAUDIUS_DIR = os.environ.get("CLAUDIUS_DIR", "/opt/claudius")
@@ -298,6 +318,50 @@ def setup_logging():
 
 logger = setup_logging()
 
+
+def load_health_module():
+    """Lazy-load health module to avoid startup failures if deps missing."""
+    global _health_module_loaded, _health_context_generator, _health_summary_getter
+    global _garmin_auth, _webhook_handler, _manual_sync_func
+
+    if _health_module_loaded:
+        return True
+
+    try:
+        from health import (
+            generate_context_block,
+            get_health_summary,
+            get_garmin_auth,
+            get_webhook_handler,
+            manual_sync,
+        )
+        _health_context_generator = generate_context_block
+        _health_summary_getter = get_health_summary
+        _garmin_auth = get_garmin_auth()
+        _webhook_handler = get_webhook_handler()
+        _manual_sync_func = manual_sync
+        _health_module_loaded = True
+        logger.info("Health module loaded successfully")
+        return True
+    except ImportError as e:
+        logger.warning(f"Health module not available: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to load health module: {e}")
+        return False
+
+
+def get_health_context() -> str:
+    """Get health context block to prepend to prompts."""
+    if not load_health_module() or not _health_context_generator:
+        return ""
+    try:
+        return _health_context_generator()
+    except Exception as e:
+        logger.warning(f"Failed to generate health context: {e}")
+        return ""
+
+
 class ClaudiusHandler(BaseHTTPRequestHandler):
     # Allow connections from anywhere (standalone mode)
     ALLOWED_ORIGINS = ["*"]
@@ -375,19 +439,112 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
             logger.error(f"Failed to update memory: {e}")
 
     def do_GET(self):
-        if self.path == "/health":
+        # Parse path and query string
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
+
+        if path == "/health":
             # Health check - no auth required
             claudius_ready = os.path.exists(CLAUDE_MD)
             auth_configured = bool(CRON_SECRET)
             clode_delegation_enabled = bool(ADMIN_SECRET)
+            health_module_ready = load_health_module()
             self.send_json({
                 "status": "ok",
                 "claudius": claudius_ready,
                 "memory_exists": os.path.exists(MEMORY_MD),
                 "auth_configured": auth_configured,
-                "clode_delegation": clode_delegation_enabled
+                "clode_delegation": clode_delegation_enabled,
+                "health_module": health_module_ready
             })
-        elif self.path == "/memory":
+
+        elif path == "/health/status":
+            # Health status endpoint - requires auth
+            if not self.validate_auth():
+                self.send_json({"error": "Unauthorized"}, 401)
+                return
+
+            if not load_health_module() or not _health_summary_getter:
+                self.send_json({"error": "Health module not available"}, 503)
+                return
+
+            try:
+                summary = _health_summary_getter()
+                self.send_json(summary)
+            except Exception as e:
+                logger.error(f"Failed to get health status: {e}")
+                self.send_json({"error": str(e)}, 500)
+
+        elif path == "/health/oauth/start":
+            # Start Garmin OAuth flow - requires auth
+            if not self.validate_auth():
+                self.send_json({"error": "Unauthorized"}, 401)
+                return
+
+            if not load_health_module() or not _garmin_auth:
+                self.send_json({"error": "Health module not available"}, 503)
+                return
+
+            try:
+                auth_url = _garmin_auth.generate_auth_url()
+                self.send_json({
+                    "success": True,
+                    "auth_url": auth_url,
+                    "message": "Open this URL in your browser to authorize Garmin access"
+                })
+            except Exception as e:
+                logger.error(f"Failed to generate auth URL: {e}")
+                self.send_json({"error": str(e)}, 500)
+
+        elif path == "/health/oauth/callback":
+            # Handle OAuth callback - requires auth
+            if not self.validate_auth():
+                self.send_json({"error": "Unauthorized"}, 401)
+                return
+
+            if not load_health_module() or not _garmin_auth:
+                self.send_json({"error": "Health module not available"}, 503)
+                return
+
+            code = query.get("code", [None])[0]
+            state = query.get("state", [None])[0]
+
+            if not code:
+                self.send_json({"error": "Missing authorization code"}, 400)
+                return
+
+            try:
+                success = _garmin_auth.handle_callback(code, state)
+                if success:
+                    self.send_json({
+                        "success": True,
+                        "message": "Garmin authorization successful! Health data sync enabled."
+                    })
+                else:
+                    self.send_json({"error": "Authorization failed"}, 400)
+            except Exception as e:
+                logger.error(f"OAuth callback failed: {e}")
+                self.send_json({"error": str(e)}, 500)
+
+        elif path == "/health/auth/status":
+            # Check Garmin auth status - requires auth
+            if not self.validate_auth():
+                self.send_json({"error": "Unauthorized"}, 401)
+                return
+
+            if not load_health_module() or not _garmin_auth:
+                self.send_json({"error": "Health module not available"}, 503)
+                return
+
+            try:
+                status = _garmin_auth.get_auth_status()
+                self.send_json(status)
+            except Exception as e:
+                logger.error(f"Failed to get auth status: {e}")
+                self.send_json({"error": str(e)}, 500)
+
+        elif path == "/memory":
             # Memory endpoint requires auth
             if not self.validate_auth():
                 logger.warning(f"Unauthorized /memory request from {self.client_address[0]}")
@@ -403,7 +560,62 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "Not found"}, 404)
 
     def do_POST(self):
-        if self.path != "/invoke":
+        # Parse path
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        # Health webhook endpoint
+        if path == "/health/webhook":
+            # Garmin webhooks may have their own auth mechanism
+            # For now, require our standard auth
+            if not self.validate_auth():
+                self.send_json({"error": "Unauthorized"}, 401)
+                return
+
+            if not load_health_module() or not _webhook_handler:
+                self.send_json({"error": "Health module not available"}, 503)
+                return
+
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode()
+
+            try:
+                payload = json.loads(body)
+                result = _webhook_handler.process_webhook(payload)
+                logger.info(f"Processed Garmin webhook: {result}")
+                self.send_json(result)
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON"}, 400)
+            except Exception as e:
+                logger.error(f"Webhook processing failed: {e}")
+                self.send_json({"error": str(e)}, 500)
+            return
+
+        # Manual health sync endpoint
+        if path == "/health/sync":
+            if not self.validate_auth():
+                self.send_json({"error": "Unauthorized"}, 401)
+                return
+
+            if not load_health_module() or not _manual_sync_func:
+                self.send_json({"error": "Health module not available"}, 503)
+                return
+
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode() if content_length > 0 else "{}"
+
+            try:
+                data = json.loads(body) if body else {}
+                days_back = data.get("days", 7)
+                result = _manual_sync_func(days_back=days_back)
+                logger.info(f"Manual health sync completed: {result}")
+                self.send_json(result)
+            except Exception as e:
+                logger.error(f"Manual sync failed: {e}")
+                self.send_json({"error": str(e)}, 500)
+            return
+
+        if path != "/invoke":
             self.send_json({"error": "Not found"}, 404)
             return
 
@@ -423,6 +635,7 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
             model = data.get("model", DEFAULT_MODEL)
             timeout = data.get("timeout", DEFAULT_TIMEOUT)
             session_id = data.get("session_id")
+            include_health = data.get("include_health", True)  # Health context enabled by default
         except json.JSONDecodeError:
             self.send_json({"success": False, "error": "Invalid JSON"}, 400)
             return
@@ -430,6 +643,14 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
         if not prompt:
             self.send_json({"success": False, "error": "No prompt provided"}, 400)
             return
+
+        # Prepend health context to prompt if enabled and available
+        health_context = ""
+        if include_health:
+            health_context = get_health_context()
+            if health_context:
+                prompt = f"{health_context}\n\n{prompt}"
+                logger.info("Health context injected into prompt")
 
         # Validate model
         if model not in VALID_MODELS:
@@ -519,7 +740,8 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
             response_data = {
                 "success": True,
                 "response": response_text,
-                "model": model
+                "model": model,
+                "health_context_included": bool(health_context)
             }
 
             # Include metadata if available
@@ -559,12 +781,25 @@ def main():
     else:
         logger.info("Authentication configured (CRON_SECRET set)")
 
+    # Try to load health module at startup
+    health_available = load_health_module()
+
     server = HTTPServer(("0.0.0.0", args.port), ClaudiusHandler)
     logger.info(f"Claudius API starting on port {args.port}")
     logger.info("Endpoints:")
-    logger.info("  POST /invoke  - Invoke Claudius (auth required)")
-    logger.info("  GET  /health  - Health check (no auth)")
-    logger.info("  GET  /memory  - View memory (auth required)")
+    logger.info("  POST /invoke          - Invoke Claudius (auth required)")
+    logger.info("  GET  /health          - Health check (no auth)")
+    logger.info("  GET  /memory          - View memory (auth required)")
+    if health_available:
+        logger.info("Health Module Endpoints:")
+        logger.info("  GET  /health/status       - Health summary (auth required)")
+        logger.info("  GET  /health/oauth/start  - Start Garmin OAuth (auth required)")
+        logger.info("  GET  /health/oauth/callback - OAuth callback (auth required)")
+        logger.info("  GET  /health/auth/status  - Garmin auth status (auth required)")
+        logger.info("  POST /health/webhook      - Garmin webhook (auth required)")
+        logger.info("  POST /health/sync         - Manual sync (auth required)")
+    else:
+        logger.warning("Health module not available - health endpoints disabled")
 
     try:
         server.serve_forever()
