@@ -213,11 +213,12 @@ def file_exists_in_folder(original_filename: str, folder_id: str) -> bool:
     token = get_access_token()
 
     # Extract just the original filename part (e.g., "5450626754.pdf" from various formats)
-    # Match files that end with this filename
     base_name = os.path.basename(original_filename)
+    # Escape single quotes in filename to prevent Drive API query injection
+    base_name_escaped = base_name.replace("\\", "\\\\").replace("'", "\\'")
 
     # Search for files containing this filename in the folder
-    query = f"'{folder_id}' in parents and name contains '{base_name}' and trashed = false"
+    query = f"'{folder_id}' in parents and name contains '{base_name_escaped}' and trashed = false"
     params = urllib.parse.urlencode({
         "q": query,
         "fields": "files(id,name)"
@@ -481,7 +482,7 @@ def load_state() -> dict:
     try:
         with open(STATE_FILE) as f:
             return json.load(f)
-    except:
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
         return {
             "last_run": None,
             "archived_message_ids": []
@@ -489,11 +490,21 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    """Save state to file."""
+    """Save state to file atomically."""
+    import tempfile
     # Keep only last 1000 archived IDs
     state["archived_message_ids"] = state["archived_message_ids"][-1000:]
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(STATE_FILE), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_path, STATE_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def send_telegram(message: str) -> bool:
@@ -576,6 +587,7 @@ def archive_receipt_emails(days_back: int = 7, verbose: bool = False):
             print(f"  Attachments: {len(attachments)}")
 
         # Upload each attachment
+        all_succeeded = True
         for att in attachments:
             filename = att["filename"]
 
@@ -605,6 +617,7 @@ def archive_receipt_emails(days_back: int = 7, verbose: bool = False):
             file_data = get_attachment(msg_id, att["attachment_id"])
             if not file_data:
                 print(f"  Failed to download: {filename}")
+                all_succeeded = False
                 continue
 
             # Upload to Drive
@@ -615,9 +628,13 @@ def archive_receipt_emails(days_back: int = 7, verbose: bool = False):
                     print(f"  ✓ Uploaded: {new_filename}")
             else:
                 print(f"  ✗ Failed to upload: {new_filename}")
+                all_succeeded = False
 
-        # Mark as archived
-        archived_ids.add(msg_id)
+        # Only mark as archived if ALL attachments processed successfully
+        if all_succeeded:
+            archived_ids.add(msg_id)
+        else:
+            print(f"  ⚠ Not marking as archived (retry on next run): {subject[:40]}")
 
     # Save state
     state["last_run"] = datetime.now(timezone.utc).isoformat()
