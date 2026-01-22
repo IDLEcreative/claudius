@@ -22,6 +22,8 @@ Author: Claudius
 import json
 import os
 import re
+import sys
+import argparse
 import base64
 import urllib.request
 import urllib.error
@@ -30,21 +32,41 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Tuple, Any
 from pathlib import Path
 
+# Add parent dir to path for lib imports
+sys.path.insert(0, str(Path(__file__).parent))
+
+from lib.config import AccountConfig
+from lib.telegram_sender import send_telegram as _send_telegram
+
 # =============================================================================
-# CONFIGURATION
+# CONFIGURATION (loaded from --account flag or default)
 # =============================================================================
 
-# IDLE CREATIVE - Primary business account
-CREDENTIALS_FILE = "/opt/claudius/.google_workspace_mcp/credentials/hello@idlecreative.co.uk.json"
-STATE_FILE = "/opt/claudius/email_router_idle_state.json"
-LEARNED_SENDERS_FILE = "/opt/claudius/email_learned_senders_idle.json"
-USER_EMAIL = "hello@idlecreative.co.uk"
+def _parse_account() -> str:
+    """Parse --account from argv without interfering with other args."""
+    for i, arg in enumerate(sys.argv):
+        if arg == "--account" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if arg.startswith("--account="):
+            return arg.split("=", 1)[1]
+    return "idle"  # Default account
 
-TELEGRAM_BOT_TOKEN = "8387428119:AAEGEeSCBSdw7y4SSv9FV_7rDzjDyu-SNmQ"
-TELEGRAM_CHAT_ID = "7070679785"
+_ACCOUNT_NAME = _parse_account()
+_ACCOUNT = AccountConfig.load(_ACCOUNT_NAME)
+
+CREDENTIALS_FILE = _ACCOUNT.credentials_file
+STATE_FILE = f"/opt/claudius/state/email_router_{_ACCOUNT.state_prefix}_state.json"
+LEARNED_SENDERS_FILE = f"/opt/claudius/state/email_learned_senders_{_ACCOUNT.state_prefix}.json"
+USER_EMAIL = _ACCOUNT.email
+
+# Telegram config (from .env via lib)
+from lib.telegram_sender import _ensure_env
+_ensure_env()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # Drive folder for invoices
-VAT_FOLDER_ID = "1Te5IUtBsVwgxG9kraLEtXlwgku56af87"
+VAT_FOLDER_ID = _ACCOUNT.vat_folder_id
 
 # Allowed attachment types for auto-save
 ALLOWED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp']

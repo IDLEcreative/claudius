@@ -1,0 +1,20 @@
+[Unit]
+Description=Claudius Self-Healing Daemon
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=claudius
+Group=docker
+WorkingDirectory=/opt/claudius
+ExecStart=/usr/bin/python3 /opt/claudius/self-healer.py
+Restart=always
+RestartSec=30
+
+# Logging
+StandardOutput=append:/opt/claudius/logs/self-healer.log
+StandardError=append:/opt/claudius/logs/self-healer.log
+
+[Install]
+WantedBy=multi-user.target

@@ -20,23 +20,48 @@ Runs alongside email-monitor.py (every 5 mins) or manually.
 import json
 import os
 import re
+import sys
 import base64
 import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Tuple
+from pathlib import Path
 
-# Config - IDLE CREATIVE
-CREDENTIALS_FILE = "/opt/claudius/.google_workspace_mcp/credentials/hello@idlecreative.co.uk.json"
-STATE_FILE = "/opt/claudius/invoice_archiver_idle_state.json"
-USER_EMAIL = "hello@idlecreative.co.uk"
+# Add parent dir to path for lib imports
+sys.path.insert(0, str(Path(__file__).parent))
 
-TELEGRAM_BOT_TOKEN = "8387428119:AAEGEeSCBSdw7y4SSv9FV_7rDzjDyu-SNmQ"
-TELEGRAM_CHAT_ID = "7070679785"
+from lib.config import AccountConfig
+from lib.telegram_sender import send_telegram as _send_telegram, _ensure_env
+
+# =============================================================================
+# CONFIGURATION (loaded from --account flag or default)
+# =============================================================================
+
+def _parse_account() -> str:
+    """Parse --account from argv without interfering with other args."""
+    for i, arg in enumerate(sys.argv):
+        if arg == "--account" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if arg.startswith("--account="):
+            return arg.split("=", 1)[1]
+    return "idle"  # Default account
+
+_ACCOUNT_NAME = _parse_account()
+_ACCOUNT = AccountConfig.load(_ACCOUNT_NAME)
+
+CREDENTIALS_FILE = _ACCOUNT.credentials_file
+STATE_FILE = f"/opt/claudius/state/invoice_archiver_{_ACCOUNT.state_prefix}_state.json"
+USER_EMAIL = _ACCOUNT.email
+
+# Telegram config (from .env)
+_ensure_env()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # Drive folder IDs
-VAT_FOLDER_ID = "1Te5IUtBsVwgxG9kraLEtXlwgku56af87"  # VAT INVOICES & RECEIPTS
+VAT_FOLDER_ID = _ACCOUNT.vat_folder_id
 
 # Quarterly folder mappings (will be populated dynamically)
 QUARTERLY_FOLDERS = {

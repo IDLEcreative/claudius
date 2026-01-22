@@ -1,0 +1,20 @@
+[Unit]
+Description=Claudius Proactive Monitor
+After=docker.service network.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=claudius
+Group=docker
+WorkingDirectory=/opt/claudius
+ExecStart=/usr/bin/python3 /opt/claudius/proactive-monitor.py
+Restart=always
+RestartSec=30
+
+# Logging
+StandardOutput=append:/opt/claudius/logs/proactive-monitor.log
+StandardError=append:/opt/claudius/logs/proactive-monitor.log
+
+[Install]
+WantedBy=multi-user.target

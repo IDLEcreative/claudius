@@ -15,7 +15,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
@@ -24,6 +23,16 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# State files (server-specific runtime data)
+state/
+
+# Credentials (sensitive)
+credentials/
+.google_workspace_mcp/
+
+# Node
+node_modules/
 
 # Virtual environment
 venv/
