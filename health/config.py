@@ -10,16 +10,14 @@ from typing import TypedDict
 # Paths
 CLAUDIUS_DIR = os.environ.get("CLAUDIUS_DIR", "/opt/claudius")
 HEALTH_DB_PATH = os.path.join(CLAUDIUS_DIR, "data", "health.db")
-GARMIN_TOKENS_PATH = os.path.join(CLAUDIUS_DIR, "secrets", "garmin_tokens.json")
+GARMIN_SESSION_PATH = os.path.join(CLAUDIUS_DIR, "secrets", "garmin_session.json")
 
-# Garmin OAuth2 Configuration
-GARMIN_OAUTH_CONFIG = {
-    "client_id": os.environ.get("GARMIN_CLIENT_ID", ""),
-    "client_secret": os.environ.get("GARMIN_CLIENT_SECRET", ""),
-    "auth_url": "https://connect.garmin.com/oauthConfirm",
-    "token_url": "https://connectapi.garmin.com/oauth-service/oauth/access_token",
-    "redirect_uri": os.environ.get("GARMIN_REDIRECT_URI", "http://77.42.19.161:3100/health/oauth/callback"),
-    "scope": "health_activity health_daily health_sleep health_stress health_hr",
+# Garmin Connect Credentials (unofficial API via python-garminconnect)
+# These are your regular Garmin Connect login credentials
+GARMIN_CONFIG = {
+    "email": os.environ.get("GARMIN_EMAIL", ""),
+    "password": os.environ.get("GARMIN_PASSWORD", ""),
+    "session_path": GARMIN_SESSION_PATH,  # Stores session to avoid re-login
 }
 
 # Data retention (days)

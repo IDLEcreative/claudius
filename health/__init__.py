@@ -4,10 +4,15 @@ Claudius Health Module - Garmin Integration
 Provides health-aware context for Claudius by integrating Garmin health data.
 
 Features:
-- Garmin Health API integration (OAuth2 PKCE)
+- Garmin Connect integration via python-garminconnect
 - SQLite storage for health metrics
 - Context generation for AI responses
 - Proactive health alerts via Telegram
+
+Setup:
+    pip install garminconnect
+    export GARMIN_EMAIL="your@email.com"
+    export GARMIN_PASSWORD="yourpassword"
 """
 
 from .config import (
@@ -15,7 +20,7 @@ from .config import (
     ALERT_COOLDOWNS,
     HEALTH_METRICS,
     CONTEXT_CONFIG,
-    GARMIN_OAUTH_CONFIG,
+    GARMIN_CONFIG,
 )
 
 from .types import (
@@ -53,8 +58,10 @@ from .garmin_api import (
 )
 
 from .garmin_sync import (
-    GarminWebhookHandler,
-    get_webhook_handler,
+    sync_health_data,
+    sync_today,
+    sync_recent,
+    backfill,
     manual_sync,
 )
 
@@ -70,7 +77,7 @@ __all__ = [
     "ALERT_COOLDOWNS",
     "HEALTH_METRICS",
     "CONTEXT_CONFIG",
-    "GARMIN_OAUTH_CONFIG",
+    "GARMIN_CONFIG",
     # Types
     "DailyHealthSummary",
     "HealthContext",
@@ -98,8 +105,10 @@ __all__ = [
     "GarminAPIError",
     "get_garmin_api",
     # Sync
-    "GarminWebhookHandler",
-    "get_webhook_handler",
+    "sync_health_data",
+    "sync_today",
+    "sync_recent",
+    "backfill",
     "manual_sync",
     # Alerts
     "process_and_send_alerts",

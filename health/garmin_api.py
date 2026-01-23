@@ -1,21 +1,16 @@
 """
-Garmin Health API Client
+Garmin Connect API Client
 
-Fetches health data from Garmin Connect using OAuth2 tokens.
-Handles rate limiting and error recovery.
+Fetches health data using the python-garminconnect library.
+This uses the unofficial Garmin Connect API (same as the mobile app).
 
-API Docs: https://developer.garmin.com/gc-developer-program/health-api/
+Install: pip install garminconnect
 """
 
-import json
-import urllib.request
-import urllib.parse
-import urllib.error
 import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from .config import GARMIN_OAUTH_CONFIG
 from .garmin_auth import get_garmin_auth, GarminAuthError
 from .types import (
     DailyHealthSummary,
@@ -31,9 +26,6 @@ from .types import (
 
 logger = logging.getLogger("claudius.health.api")
 
-# Garmin Health API Base URL
-API_BASE = "https://apis.garmin.com/wellness-api/rest"
-
 
 class GarminAPIError(Exception):
     """Raised when Garmin API request fails."""
@@ -43,306 +35,257 @@ class GarminAPIError(Exception):
 
 
 class GarminAPI:
-    """Client for Garmin Health API."""
+    """Client for Garmin Connect using python-garminconnect."""
 
     def __init__(self):
         self._auth = get_garmin_auth()
 
-    def _make_request(
-        self,
-        endpoint: str,
-        params: Optional[dict] = None,
-        method: str = "GET"
-    ) -> dict:
-        """Make authenticated request to Garmin API."""
-        token = self._auth.get_access_token()
-        if not token:
-            raise GarminAPIError("Not authenticated - complete OAuth flow first")
-
-        url = f"{API_BASE}{endpoint}"
-        if params:
-            url = f"{url}?{urllib.parse.urlencode(params)}"
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-        }
-
-        req = urllib.request.Request(url, headers=headers, method=method)
-
+    def _get_client(self):
+        """Get authenticated Garmin client."""
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                return json.loads(response.read().decode())
-
-        except urllib.error.HTTPError as e:
-            if e.code == 401:
-                # Token expired, try refresh
-                logger.info("Token expired, attempting refresh...")
-                if self._auth.refresh_token():
-                    return self._make_request(endpoint, params, method)
-                raise GarminAPIError("Authentication failed - re-authenticate required", 401)
-
-            error_body = e.read().decode() if e.fp else ""
-            logger.error(f"Garmin API error: {e.code} - {error_body}")
-            raise GarminAPIError(f"API request failed: {e.code}", e.code)
-
-        except urllib.error.URLError as e:
-            logger.error(f"Network error: {e}")
-            raise GarminAPIError(f"Network error: {e}")
-
-    # ============== Data Fetchers ==============
+            return self._auth.get_client()
+        except GarminAuthError as e:
+            raise GarminAPIError(f"Authentication failed: {e}")
 
     def get_sleep(self, target_date: date) -> Optional[SleepData]:
         """Fetch sleep data for a specific date."""
         try:
-            data = self._make_request("/sleeps", {
-                "uploadStartTimeInSeconds": int(datetime.combine(
-                    target_date, datetime.min.time()
-                ).timestamp()),
-                "uploadEndTimeInSeconds": int(datetime.combine(
-                    target_date + timedelta(days=1), datetime.min.time()
-                ).timestamp()),
-            })
+            client = self._get_client()
+            data = client.get_sleep_data(target_date.isoformat())
 
-            if not data or not isinstance(data, list) or len(data) == 0:
+            if not data:
                 return None
 
-            sleep = data[0]  # Most recent sleep for that day
-            duration_seconds = sleep.get("durationInSeconds", 0)
+            # Extract sleep data from response
+            daily_sleep = data.get("dailySleepDTO", {})
+            if not daily_sleep:
+                return None
+
+            duration_seconds = daily_sleep.get("sleepTimeSeconds", 0)
+            if duration_seconds == 0:
+                return None
+
+            # Sleep levels breakdown
+            levels = data.get("sleepLevels", {})
 
             return SleepData(
                 date=target_date,
                 duration_hours=duration_seconds / 3600,
-                score=sleep.get("overallSleepScore", {}).get("value", 0),
-                deep_hours=sleep.get("deepSleepDurationInSeconds", 0) / 3600,
-                light_hours=sleep.get("lightSleepDurationInSeconds", 0) / 3600,
-                rem_hours=sleep.get("remSleepInSeconds", 0) / 3600,
-                awake_hours=sleep.get("awakeDurationInSeconds", 0) / 3600,
+                score=daily_sleep.get("sleepScores", {}).get("overall", {}).get("value", 0),
+                deep_hours=levels.get("deepSleepSeconds", 0) / 3600,
+                light_hours=levels.get("lightSleepSeconds", 0) / 3600,
+                rem_hours=levels.get("remSleepSeconds", 0) / 3600,
+                awake_hours=levels.get("awakeSleepSeconds", 0) / 3600,
             )
 
-        except GarminAPIError as e:
+        except GarminAPIError:
+            raise
+        except Exception as e:
             logger.error(f"Failed to fetch sleep: {e}")
             return None
+
+    def get_stats(self, target_date: date) -> dict:
+        """Fetch daily stats (steps, stress, body battery, etc.)."""
+        try:
+            client = self._get_client()
+            return client.get_stats(target_date.isoformat()) or {}
+        except Exception as e:
+            logger.error(f"Failed to fetch stats: {e}")
+            return {}
 
     def get_heart_rate(self, target_date: date) -> Optional[HeartRateData]:
         """Fetch heart rate data for a specific date."""
         try:
-            data = self._make_request("/dailies", {
-                "uploadStartTimeInSeconds": int(datetime.combine(
-                    target_date, datetime.min.time()
-                ).timestamp()),
-                "uploadEndTimeInSeconds": int(datetime.combine(
-                    target_date + timedelta(days=1), datetime.min.time()
-                ).timestamp()),
-            })
+            client = self._get_client()
+            data = client.get_heart_rates(target_date.isoformat())
 
-            if not data or not isinstance(data, list) or len(data) == 0:
+            if not data:
                 return None
-
-            daily = data[0]
 
             return HeartRateData(
                 date=target_date,
-                resting=daily.get("restingHeartRateInBeatsPerMinute", 0),
-                max=daily.get("maxHeartRateInBeatsPerMinute", 0),
-                min=daily.get("minHeartRateInBeatsPerMinute", 0),
-                zones={},  # Heart rate zones not in daily summary
+                resting=data.get("restingHeartRate", 0),
+                max=data.get("maxHeartRate", 0),
+                min=data.get("minHeartRate", 0),
+                zones={},
             )
 
-        except GarminAPIError as e:
+        except Exception as e:
             logger.error(f"Failed to fetch heart rate: {e}")
             return None
 
     def get_stress(self, target_date: date) -> Optional[StressData]:
         """Fetch stress data for a specific date."""
         try:
-            data = self._make_request("/dailies", {
-                "uploadStartTimeInSeconds": int(datetime.combine(
-                    target_date, datetime.min.time()
-                ).timestamp()),
-                "uploadEndTimeInSeconds": int(datetime.combine(
-                    target_date + timedelta(days=1), datetime.min.time()
-                ).timestamp()),
-            })
-
-            if not data or not isinstance(data, list) or len(data) == 0:
+            stats = self.get_stats(target_date)
+            if not stats:
                 return None
 
-            daily = data[0]
-            avg_stress = daily.get("averageStressLevel", 0)
-            max_stress = daily.get("maxStressLevel", 0)
+            avg_stress = stats.get("averageStressLevel", -1)
+            if avg_stress < 0:
+                return None
 
             return StressData(
                 date=target_date,
                 avg_level=avg_stress,
-                max_level=max_stress,
+                max_level=stats.get("maxStressLevel", avg_stress),
                 qualifier=StressData.qualifier_from_level(avg_stress),
             )
 
-        except GarminAPIError as e:
+        except Exception as e:
             logger.error(f"Failed to fetch stress: {e}")
             return None
 
     def get_body_battery(self, target_date: date) -> Optional[BodyBatteryData]:
         """Fetch Body Battery data for a specific date."""
         try:
-            data = self._make_request("/dailies", {
-                "uploadStartTimeInSeconds": int(datetime.combine(
-                    target_date, datetime.min.time()
-                ).timestamp()),
-                "uploadEndTimeInSeconds": int(datetime.combine(
-                    target_date + timedelta(days=1), datetime.min.time()
-                ).timestamp()),
-            })
-
-            if not data or not isinstance(data, list) or len(data) == 0:
+            stats = self.get_stats(target_date)
+            if not stats:
                 return None
 
-            daily = data[0]
-
-            # Body Battery is in bodyBatteryChargedValue and bodyBatteryDrainedValue
-            charged = daily.get("bodyBatteryChargedValue", 0)
-            drained = daily.get("bodyBatteryDrainedValue", 0)
-
-            # Garmin may also provide bodyBatteryHighestValue and bodyBatteryLowestValue
-            start_value = daily.get("bodyBatteryHighestValue", 100) - charged
-            end_value = daily.get("bodyBatteryLowestValue", start_value + charged - drained)
+            # Body battery data from stats
+            bb_data = stats.get("bodyBatteryChargedValue")
+            if bb_data is None:
+                return None
 
             return BodyBatteryData(
                 date=target_date,
-                start_value=max(0, min(100, start_value)),
-                end_value=max(0, min(100, end_value)),
-                charged=charged,
-                drained=drained,
+                start_value=stats.get("bodyBatteryHighestValue", 100),
+                end_value=stats.get("bodyBatteryLowestValue", 50),
+                charged=stats.get("bodyBatteryChargedValue", 0),
+                drained=stats.get("bodyBatteryDrainedValue", 0),
             )
 
-        except GarminAPIError as e:
+        except Exception as e:
             logger.error(f"Failed to fetch body battery: {e}")
             return None
 
     def get_hrv(self, target_date: date) -> Optional[HRVData]:
-        """Fetch HRV Status data for a specific date."""
+        """Fetch HRV data for a specific date."""
         try:
-            # HRV uses a dedicated endpoint
-            data = self._make_request("/hrv", {
-                "uploadStartTimeInSeconds": int(datetime.combine(
-                    target_date, datetime.min.time()
-                ).timestamp()),
-                "uploadEndTimeInSeconds": int(datetime.combine(
-                    target_date + timedelta(days=1), datetime.min.time()
-                ).timestamp()),
-            })
+            client = self._get_client()
+            data = client.get_hrv_data(target_date.isoformat())
 
-            if not data or not isinstance(data, list) or len(data) == 0:
+            if not data:
                 return None
 
-            hrv = data[0]
+            # HRV summary
+            summary = data.get("hrvSummary", {})
+            if not summary:
+                # Try alternative structure
+                hrv_value = data.get("lastNightAvg", data.get("weeklyAvg", 0))
+                status = data.get("status", "BALANCED")
+            else:
+                hrv_value = summary.get("lastNightAvg", summary.get("weeklyAvg", 0))
+                status = summary.get("status", "BALANCED")
 
-            # HRV value is typically in weekly average or current
-            hrv_value = hrv.get("hrvValue", hrv.get("weeklyAvg", 0))
-            status = hrv.get("status", "balanced").lower()
+            if not hrv_value:
+                return None
+
+            # Normalize status
+            status_map = {
+                "BALANCED": "balanced",
+                "LOW": "low",
+                "UNBALANCED": "unbalanced",
+            }
 
             return HRVData(
                 date=target_date,
                 value=int(hrv_value),
-                status=status if status in ["balanced", "low", "unbalanced"] else "balanced",
+                status=status_map.get(status.upper(), "balanced"),
             )
 
-        except GarminAPIError as e:
+        except Exception as e:
             logger.error(f"Failed to fetch HRV: {e}")
             return None
 
     def get_spo2(self, target_date: date) -> Optional[SpO2Data]:
         """Fetch SpO2 (Pulse Ox) data for a specific date."""
         try:
-            data = self._make_request("/pulseox", {
-                "uploadStartTimeInSeconds": int(datetime.combine(
-                    target_date, datetime.min.time()
-                ).timestamp()),
-                "uploadEndTimeInSeconds": int(datetime.combine(
-                    target_date + timedelta(days=1), datetime.min.time()
-                ).timestamp()),
-            })
+            client = self._get_client()
+            data = client.get_spo2_data(target_date.isoformat())
 
-            if not data or not isinstance(data, list) or len(data) == 0:
+            if not data:
                 return None
 
-            spo2 = data[0]
+            # Get averages from the data
+            avg = data.get("averageSpO2", data.get("avgValue"))
+            min_val = data.get("lowestSpO2", data.get("minValue", avg))
+
+            if not avg:
+                return None
 
             return SpO2Data(
                 date=target_date,
-                avg=spo2.get("averageSpO2", 0),
-                min=spo2.get("lowestSpO2", spo2.get("averageSpO2", 0)),
+                avg=float(avg),
+                min=float(min_val) if min_val else float(avg),
             )
 
-        except GarminAPIError as e:
+        except Exception as e:
             logger.error(f"Failed to fetch SpO2: {e}")
             return None
 
     def get_activity(self, target_date: date) -> Optional[ActivityData]:
         """Fetch activity summary for a specific date."""
         try:
-            data = self._make_request("/dailies", {
-                "uploadStartTimeInSeconds": int(datetime.combine(
-                    target_date, datetime.min.time()
-                ).timestamp()),
-                "uploadEndTimeInSeconds": int(datetime.combine(
-                    target_date + timedelta(days=1), datetime.min.time()
-                ).timestamp()),
-            })
-
-            if not data or not isinstance(data, list) or len(data) == 0:
+            stats = self.get_stats(target_date)
+            if not stats:
                 return None
 
-            daily = data[0]
+            steps = stats.get("totalSteps", 0)
+            if steps == 0:
+                return None
+
+            # Calculate active minutes
+            moderate = stats.get("moderateIntensityMinutes", 0)
+            vigorous = stats.get("vigorousIntensityMinutes", 0)
 
             return ActivityData(
                 date=target_date,
-                steps=daily.get("steps", 0),
-                active_minutes=daily.get("moderateIntensityDurationInSeconds", 0) // 60 +
-                              daily.get("vigorousIntensityDurationInSeconds", 0) // 60,
-                calories_total=daily.get("activeKilocalories", 0) +
-                              daily.get("bmrKilocalories", 0),
-                floors_climbed=daily.get("floorsClimbed", 0),
-                distance_km=daily.get("distanceInMeters", 0) / 1000,
+                steps=steps,
+                active_minutes=moderate + vigorous,
+                calories_total=stats.get("totalKilocalories", 0),
+                floors_climbed=stats.get("floorsAscended", 0),
+                distance_km=stats.get("totalDistanceMeters", 0) / 1000,
             )
 
-        except GarminAPIError as e:
+        except Exception as e:
             logger.error(f"Failed to fetch activity: {e}")
             return None
 
     def get_workouts(self, target_date: date) -> list[WorkoutData]:
         """Fetch workouts/activities for a specific date."""
         try:
-            data = self._make_request("/activities", {
-                "uploadStartTimeInSeconds": int(datetime.combine(
-                    target_date, datetime.min.time()
-                ).timestamp()),
-                "uploadEndTimeInSeconds": int(datetime.combine(
-                    target_date + timedelta(days=1), datetime.min.time()
-                ).timestamp()),
-            })
+            client = self._get_client()
+            # Get activities for the date range
+            start = datetime.combine(target_date, datetime.min.time())
+            end = datetime.combine(target_date + timedelta(days=1), datetime.min.time())
 
-            if not data or not isinstance(data, list):
+            activities = client.get_activities_by_date(
+                start.strftime("%Y-%m-%d"),
+                end.strftime("%Y-%m-%d")
+            )
+
+            if not activities:
                 return []
 
             workouts = []
-            for activity in data:
+            for activity in activities:
                 workouts.append(WorkoutData(
-                    id=str(activity.get("activityId", activity.get("summaryId", ""))),
+                    id=str(activity.get("activityId", "")),
                     date=target_date,
-                    activity_type=activity.get("activityType", "unknown"),
-                    duration_minutes=activity.get("durationInSeconds", 0) / 60,
-                    distance_km=activity.get("distanceInMeters", 0) / 1000 if activity.get("distanceInMeters") else None,
-                    calories=activity.get("activeKilocalories"),
-                    avg_hr=activity.get("averageHeartRateInBeatsPerMinute"),
-                    max_hr=activity.get("maxHeartRateInBeatsPerMinute"),
+                    activity_type=activity.get("activityType", {}).get("typeKey", "unknown"),
+                    duration_minutes=activity.get("duration", 0) / 60,
+                    distance_km=activity.get("distance", 0) / 1000 if activity.get("distance") else None,
+                    calories=activity.get("calories"),
+                    avg_hr=activity.get("averageHR"),
+                    max_hr=activity.get("maxHR"),
                     training_effect=activity.get("aerobicTrainingEffect"),
                 ))
 
             return workouts
 
-        except GarminAPIError as e:
+        except Exception as e:
             logger.error(f"Failed to fetch workouts: {e}")
             return []
 
@@ -364,7 +307,7 @@ class GarminAPI:
         summary.workouts = self.get_workouts(target_date)
         summary.synced_at = datetime.utcnow()
 
-        logger.info(f"Fetched health summary for {target_date}: {summary.has_data}")
+        logger.info(f"Fetched health summary for {target_date}: has_data={summary.has_data}")
         return summary
 
     def sync_date_range(self, start_date: date, end_date: date) -> list[DailyHealthSummary]:

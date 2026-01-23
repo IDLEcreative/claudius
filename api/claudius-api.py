@@ -36,9 +36,8 @@ API Endpoints:
 
     Health Module Endpoints:
     GET  /health/status         - Get current health summary
-    GET  /health/oauth/start    - Start Garmin OAuth flow
-    GET  /health/oauth/callback - Handle OAuth callback (with ?code=...)
-    POST /health/webhook        - Receive Garmin push notifications
+    GET  /health/auth/status    - Check Garmin authentication status
+    POST /health/login          - Login to Garmin (credentials from env vars)
     POST /health/sync           - Trigger manual health data sync
 
 Authentication:
@@ -69,7 +68,6 @@ _health_module_loaded = False
 _health_context_generator = None
 _health_summary_getter = None
 _garmin_auth = None
-_webhook_handler = None
 _manual_sync_func = None
 
 # Configuration - updated paths for standalone repo
@@ -322,7 +320,7 @@ logger = setup_logging()
 def load_health_module():
     """Lazy-load health module to avoid startup failures if deps missing."""
     global _health_module_loaded, _health_context_generator, _health_summary_getter
-    global _garmin_auth, _webhook_handler, _manual_sync_func
+    global _garmin_auth, _manual_sync_func
 
     if _health_module_loaded:
         return True
@@ -332,13 +330,11 @@ def load_health_module():
             generate_context_block,
             get_health_summary,
             get_garmin_auth,
-            get_webhook_handler,
             manual_sync,
         )
         _health_context_generator = generate_context_block
         _health_summary_getter = get_health_summary
         _garmin_auth = get_garmin_auth()
-        _webhook_handler = get_webhook_handler()
         _manual_sync_func = manual_sync
         _health_module_loaded = True
         logger.info("Health module loaded successfully")
@@ -476,57 +472,6 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
                 logger.error(f"Failed to get health status: {e}")
                 self.send_json({"error": str(e)}, 500)
 
-        elif path == "/health/oauth/start":
-            # Start Garmin OAuth flow - requires auth
-            if not self.validate_auth():
-                self.send_json({"error": "Unauthorized"}, 401)
-                return
-
-            if not load_health_module() or not _garmin_auth:
-                self.send_json({"error": "Health module not available"}, 503)
-                return
-
-            try:
-                auth_url = _garmin_auth.generate_auth_url()
-                self.send_json({
-                    "success": True,
-                    "auth_url": auth_url,
-                    "message": "Open this URL in your browser to authorize Garmin access"
-                })
-            except Exception as e:
-                logger.error(f"Failed to generate auth URL: {e}")
-                self.send_json({"error": str(e)}, 500)
-
-        elif path == "/health/oauth/callback":
-            # Handle OAuth callback - requires auth
-            if not self.validate_auth():
-                self.send_json({"error": "Unauthorized"}, 401)
-                return
-
-            if not load_health_module() or not _garmin_auth:
-                self.send_json({"error": "Health module not available"}, 503)
-                return
-
-            code = query.get("code", [None])[0]
-            state = query.get("state", [None])[0]
-
-            if not code:
-                self.send_json({"error": "Missing authorization code"}, 400)
-                return
-
-            try:
-                success = _garmin_auth.handle_callback(code, state)
-                if success:
-                    self.send_json({
-                        "success": True,
-                        "message": "Garmin authorization successful! Health data sync enabled."
-                    })
-                else:
-                    self.send_json({"error": "Authorization failed"}, 400)
-            except Exception as e:
-                logger.error(f"OAuth callback failed: {e}")
-                self.send_json({"error": str(e)}, 500)
-
         elif path == "/health/auth/status":
             # Check Garmin auth status - requires auth
             if not self.validate_auth():
@@ -564,30 +509,32 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        # Health webhook endpoint
-        if path == "/health/webhook":
-            # Garmin webhooks may have their own auth mechanism
-            # For now, require our standard auth
+        # Garmin login endpoint (credential-based auth via python-garminconnect)
+        if path == "/health/login":
             if not self.validate_auth():
                 self.send_json({"error": "Unauthorized"}, 401)
                 return
 
-            if not load_health_module() or not _webhook_handler:
+            if not load_health_module() or not _garmin_auth:
                 self.send_json({"error": "Health module not available"}, 503)
                 return
 
             content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length).decode()
+            body = self.rfile.read(content_length).decode() if content_length > 0 else "{}"
 
             try:
-                payload = json.loads(body)
-                result = _webhook_handler.process_webhook(payload)
-                logger.info(f"Processed Garmin webhook: {result}")
-                self.send_json(result)
-            except json.JSONDecodeError:
-                self.send_json({"error": "Invalid JSON"}, 400)
+                data = json.loads(body) if body else {}
+                force_new = data.get("force_new", False)
+                success = _garmin_auth.login(force_new=force_new)
+                if success:
+                    self.send_json({
+                        "success": True,
+                        "message": "Garmin login successful! Health data sync enabled."
+                    })
+                else:
+                    self.send_json({"error": "Login failed"}, 400)
             except Exception as e:
-                logger.error(f"Webhook processing failed: {e}")
+                logger.error(f"Garmin login failed: {e}")
                 self.send_json({"error": str(e)}, 500)
             return
 
@@ -793,10 +740,8 @@ def main():
     if health_available:
         logger.info("Health Module Endpoints:")
         logger.info("  GET  /health/status       - Health summary (auth required)")
-        logger.info("  GET  /health/oauth/start  - Start Garmin OAuth (auth required)")
-        logger.info("  GET  /health/oauth/callback - OAuth callback (auth required)")
         logger.info("  GET  /health/auth/status  - Garmin auth status (auth required)")
-        logger.info("  POST /health/webhook      - Garmin webhook (auth required)")
+        logger.info("  POST /health/login        - Garmin login (auth required)")
         logger.info("  POST /health/sync         - Manual sync (auth required)")
     else:
         logger.warning("Health module not available - health endpoints disabled")
