@@ -492,7 +492,7 @@ If someone asks about servers or Docker → that's you
 
 ### SPAWNING SUBAGENTS
 
-**Two methods are available:**
+**Three methods available:**
 
 **1. Task Tool (Inline, Blocking)**
 Use the **Task tool** for parallel or complex work within a conversation:
@@ -504,39 +504,52 @@ Use the **Task tool** for parallel or complex work within a conversation:
 Use for heavy/long-running work that shouldn't block your HTTP connection:
 
 ```python
-# Via HTTP API
-POST /spawn
-{"prompt": "Fix all LOC violations", "working_dir": "/opt/omniops"}
-# Returns immediately with task_id
-
-# Check status
-POST /spawn/status
-{"task_id": "abc123"}
-```
-
-Or programmatically:
-```python
 from lib.async_agent_spawner import spawn_agent, check_agent_status
 task_id = await spawn_agent("Fix the LOC violations")
 status = await check_agent_status(task_id)
 ```
 
-**Key differences:**
-| Feature | Task Tool | Async Spawner |
-|---------|-----------|---------------|
-| Blocking | Yes | No |
-| Max plan tokens | Yes | Yes |
-| HTTP timeout safe | No | Yes |
-| Telegram notification | Manual | Automatic |
+Or via HTTP API:
+```python
+POST /spawn
+{"prompt": "Fix all LOC violations", "working_dir": "/opt/claudius"}
+```
+
+**3. Coordinated Multi-Agent (Shared Task List)**
+For orchestrated work where agents need to coordinate:
+
+```python
+from lib.coordinated_agents import spawn_coordinated, check_session_status
+
+session = await spawn_coordinated([
+    {"prompt": "Fix type errors in src/", "depends_on": []},
+    {"prompt": "Fix lint warnings", "depends_on": []},
+    {"prompt": "Run full test suite", "depends_on": [0, 1]},
+])
+
+# Agents 0 and 1 run in parallel
+# Agent 2 waits for both to complete before starting
+# All agents share a CLAUDE_CODE_TASK_LIST_ID for coordination
+
+status = await check_session_status(session.session_id)
+```
+
+**How coordination works:**
+- Creates a shared task list ID (CLAUDE_CODE_TASK_LIST_ID env var)
+- All agents in a session can see each other's task progress
+- Dependency groups run sequentially; agents within a group run in parallel
+- Manifest file tracks overall session state
 
 **When to use which:**
 - **Task tool:** Quick parallel research, exploration, planning
-- **Async spawner:** Night Watch, auto-fix, refactoring, anything >2 minutes
+- **Async spawner:** Night Watch, auto-fix, single long-running tasks
+- **Coordinated:** Multi-step workflows with dependencies (build→test→deploy)
 
 **Resource limits (prevent crashes):**
 - Max 2 concurrent agents
 - Min 4GB free RAM required
 - Agent queue with backoff if at limit
+- 10-minute timeout per dependency group
 
 ---
 

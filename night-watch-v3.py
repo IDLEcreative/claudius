@@ -446,6 +446,14 @@ Focus on real issues, not style nitpicks."""
         if clode_response:
             self.log("Got Clode analysis")
             self.add_finding("code", "info", "Clode Deep Analysis", clode_response[:3000])
+
+            # Persist full Clode analysis separately (never truncate the detailed report)
+            date_str = datetime.now().strftime("%Y%m%d")
+            clode_file = REPORTS_DIR / f"night-watch-{date_str}-clode-full.md"
+            with open(clode_file, "w") as f:
+                f.write(f"# Clode Deep Analysis — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
+                f.write(clode_response)
+            self.log(f"Full Clode analysis saved to {clode_file}")
         else:
             self.log("Clode unavailable - falling back to static checks")
             
