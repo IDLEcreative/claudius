@@ -18,8 +18,10 @@ DEFAULT_MAX_DELAY = 30.0
 DEFAULT_EXPONENTIAL_BASE = 2
 
 
-def exponential_backoff(attempt: int, base_delay: float, max_delay: float,
-                        exponential_base: int, jitter: bool = True) -> float:
+def exponential_backoff(attempt: int, base_delay: float = DEFAULT_BASE_DELAY,
+                        max_delay: float = DEFAULT_MAX_DELAY,
+                        exponential_base: int = DEFAULT_EXPONENTIAL_BASE,
+                        jitter: bool = True) -> float:
     """Calculate delay for exponential backoff.
 
     Args:
