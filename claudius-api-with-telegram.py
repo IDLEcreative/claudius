@@ -61,6 +61,7 @@ sys.path.insert(0, '/opt/claudius')
 from claudius.core.agent import get_agent_pool, invoke_claudius as _invoke_claudius_pooled
 from claudius.core.retry import retry_with_backoff
 from claudius.memory.unified import get_unified_memory
+from memory_hook import send_to_engram
 
 # Configuration
 CLAUDIUS_DIR = "/opt/claudius"
@@ -714,6 +715,25 @@ def get_brain_stats_via_http() -> dict:
 
 
 # =============================================================================
+# Passive Memory (Surprise Detection - Background)
+# =============================================================================
+
+def run_memory_hook(response: str, context: str):
+    """Run surprise detection in background thread. Non-blocking."""
+    def _detect():
+        try:
+            result = send_to_engram(response, context)
+            if result.get("wasSaved"):
+                logger.info(f"[Memory] Surprise saved (score: {result.get('surpriseScore', 0):.2f})")
+            elif "error" in result:
+                logger.warning(f"[Memory] Hook error: {result['error']}")
+        except Exception as e:
+            logger.warning(f"[Memory] Hook failed: {e}")
+
+    threading.Thread(target=_detect, daemon=True, name="MemoryHook").start()
+
+
+# =============================================================================
 # Core Claudius Functions
 # =============================================================================
 
@@ -1281,6 +1301,9 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
             response = result.get("response", "No response")
             logger.info(f"[Telegram] Response: {response[:50]}...")
 
+            # Passive memory: run surprise detection in background
+            run_memory_hook(response, text)
+
             # Save assistant response to Supabase
             save_claudius_message(
                 chat_id=chat_id,
@@ -1363,6 +1386,9 @@ class ClaudiusHandler(BaseHTTPRequestHandler):
 
         response_text = result.get("response", "No response")
         new_session_id = result.get("session_id")
+
+        # Passive memory: run surprise detection in background
+        run_memory_hook(response_text, prompt)
 
         # Save assistant response to Supabase
         save_claudius_message(

@@ -1,0 +1,9 @@
+# Docker-specific git config for Clode container
+# Isolated from host's personal config to prevent credential leakage
+# Identity is set via GIT_AUTHOR_NAME/EMAIL env vars in docker-compose
+
+[credential]
+    helper = store --file /home/pwuser/.git-credentials
+
+[safe]
+    directory = /repo

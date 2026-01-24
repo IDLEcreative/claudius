@@ -34,18 +34,20 @@ BRAIN_API = "http://localhost:3000/api/admin/brain"
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 DOCKER_SOCKET = "/var/run/docker.sock"
-OWNER_CHAT_ID = "7070679785"
-
 # Load .env if token not set
 if not TELEGRAM_BOT_TOKEN:
     try:
         with open("/opt/omniops/.env", "r") as f:
             for line in f:
-                if line.startswith("TELEGRAM_BOT_TOKEN="):
-                    TELEGRAM_BOT_TOKEN = line.split("=", 1)[1].strip().strip('"')
-                    break
-    except:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    os.environ.setdefault(k.strip(), v.strip().strip('"'))
+        TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    except Exception:
         pass
+
+OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "7070679785")
 
 # Enable autonomous investigation for unknown errors
 ENABLE_INVESTIGATION = True

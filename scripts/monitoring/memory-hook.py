@@ -30,10 +30,7 @@ import urllib.error
 
 # Configuration
 ENGRAM_URL = os.environ.get("ENGRAM_URL", "http://localhost:3201")
-ENGRAM_API_KEY = os.environ.get(
-    "ENGRAM_API_KEY",
-    "45f50959c089a02dab0397052a2bb9ddc95e7184997ee422cca7b242c2d20293"
-)
+ENGRAM_API_KEY = os.environ.get("ENGRAM_API_KEY") or os.environ.get("ADMIN_SECRET", "")
 
 def send_to_engram(response: str, context: str, source_agent: str = "claudius") -> dict:
     """

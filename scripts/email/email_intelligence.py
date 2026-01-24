@@ -24,8 +24,8 @@ STATE_FILE = "/opt/claudius/email_intelligence_state.json"
 CREDENTIALS_FILE = "/opt/claudius/.google_workspace_mcp/credentials/james.d.guy@gmail.com.json"
 
 # Engram API config
-ENGRAM_URL = "http://localhost:3201/engram"
-ENGRAM_KEY = "45f50959c089a02dab0397052a2bb9ddc95e7184997ee422cca7b242c2d20293"
+ENGRAM_URL = os.environ.get("ENGRAM_API_URL", "http://localhost:3201/engram")
+ENGRAM_KEY = os.environ.get("ADMIN_SECRET", "")
 
 
 def load_state() -> dict:

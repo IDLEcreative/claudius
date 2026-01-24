@@ -16,9 +16,21 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 
+# Load .env if not already in environment
+if not os.environ.get("TELEGRAM_BOT_TOKEN"):
+    for _env_path in ["/opt/claudius/.env", "/opt/omniops/.env"]:
+        if os.path.exists(_env_path):
+            with open(_env_path) as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if _line and not _line.startswith("#") and "=" in _line:
+                        _k, _, _v = _line.partition("=")
+                        os.environ.setdefault(_k.strip(), _v.strip().strip('"'))
+            break
+
 # Config
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8387428119:AAEGEeSCBSdw7y4SSv9FV_7rDzjDyu-SNmQ")
-TELEGRAM_CHAT_ID = "7070679785"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "7070679785")
 CREDENTIALS_FILE = "/opt/claudius/.google_workspace_mcp/credentials/james.d.guy@gmail.com.json"
 ACTION_STATE_FILE = "/opt/claudius/email_actions_state.json"
 
