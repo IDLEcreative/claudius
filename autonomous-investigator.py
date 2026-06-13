@@ -34,7 +34,7 @@ DOCKER_SOCKET = "/var/run/docker.sock"
 # Load .env if token not set
 if not TELEGRAM_BOT_TOKEN:
     try:
-        with open("/opt/omniops/.env", "r") as f:
+        with open("/opt/claudius/.env", "r") as f:
             for line in f:
                 if line.startswith("TELEGRAM_BOT_TOKEN="):
                     TELEGRAM_BOT_TOKEN = line.split("=", 1)[1].strip().strip('"')
@@ -413,7 +413,7 @@ def main():
     import sys
 
     investigator = AutonomousInvestigator()
-    containers = ["omniops-app-live", "omniops-redis"]
+    containers = ["omniops-app", "omniops-redis"]
 
     if len(sys.argv) > 1:
         cmd = sys.argv[1]

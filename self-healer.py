@@ -37,7 +37,7 @@ DOCKER_SOCKET = "/var/run/docker.sock"
 # Load .env if token not set
 if not TELEGRAM_BOT_TOKEN:
     try:
-        with open("/opt/omniops/.env", "r") as f:
+        with open("/opt/claudius/.env", "r") as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
@@ -55,7 +55,7 @@ INVESTIGATION_COOLDOWN = 3600  # 1 hour between investigating same error signatu
 
 # Containers to monitor
 MONITORED_CONTAINERS = [
-    "omniops-app-live",
+    "omniops-app",
     "omniops-redis",
 ]
 
@@ -78,7 +78,7 @@ class KnownFix:
     pattern: str  # regex to match in logs
     fix_command: str  # command to run
     description: str
-    container: str = "omniops-app-live"
+    container: str = "omniops-app"
     cooldown: int = 300  # seconds before applying same fix again
     last_applied: float = 0
 
@@ -99,9 +99,9 @@ KNOWN_FIXES: List[KnownFix] = [
     KnownFix(
         name="dangerously-skip-permissions",
         pattern=r"--dangerously-skip-permissions cannot be used with root",
-        fix_command="""docker exec omniops-app-live sh -c "sed -i 's/--dangerously-skip-permissions//g' /app/lib/advisor-board-v2/opus-executor.js 2>/dev/null || true" """,
+        fix_command="""docker exec omniops-app sh -c "sed -i 's/--dangerously-skip-permissions//g' /app/lib/advisor-board-v2/opus-executor.js 2>/dev/null || true" """,
         description="Remove --dangerously-skip-permissions flag from Claude CLI invocations",
-        container="omniops-app-live",
+        container="omniops-app",
         cooldown=600
     ),
     KnownFix(

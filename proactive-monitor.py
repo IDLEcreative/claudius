@@ -38,7 +38,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 # Load .env if token not set
 if not TELEGRAM_BOT_TOKEN:
     try:
-        with open("/opt/omniops/.env", "r") as f:
+        with open("/opt/claudius/.env", "r") as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
@@ -236,7 +236,7 @@ class ProactiveMonitor:
             logger.info("Skipping container alerts - deployment in progress")
             return
 
-        containers = ["omniops-app-live", "omniops-redis"]
+        containers = ["omniops-app", "omniops-redis"]
 
         for container in containers:
             code, stdout, _ = self.run_command(
