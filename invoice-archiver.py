@@ -26,14 +26,16 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Tuple
 from pathlib import Path
 
 # Add parent dir to path for lib imports
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.config import AccountConfig
-from lib.telegram_sender import send_telegram as _send_telegram, _ensure_env
+from lib.financial_attachments import financial_attachments
+from lib.financial_archive import archive_files
+from lib.telegram_sender import _ensure_env
 
 # =============================================================================
 # CONFIGURATION (loaded from --account flag or default)
@@ -62,54 +64,6 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # Drive folder IDs
 VAT_FOLDER_ID = _ACCOUNT.vat_folder_id
-
-# Quarterly folder mappings (will be populated dynamically)
-QUARTERLY_FOLDERS = {
-    # Format: (year, quarter) -> folder_id
-    # Quarter 1: Jan-Mar, Q2: Apr-Jun, Q3: Jul-Sep, Q4: Oct-Dec
-    # But your system uses 3-month rolling: Dec-Feb, Mar-May, Jun-Aug, Sep-Nov
-}
-
-# Your quarterly periods (start month -> period name)
-# Dec 1 - Feb 28/29
-# Mar 1 - May 31
-# Jun 1 - Aug 31
-# Sep 1 - Nov 30
-PERIOD_DEFINITIONS = [
-    ((12, 1), (2, 28), "01.12.{y1} – 30.02.{y2}"),   # Dec-Feb (crosses year)
-    ((3, 1), (5, 31), "01.03.{y1} – 31.05.{y1}"),    # Mar-May
-    ((6, 1), (8, 31), "01.06.{y1} – 31.08.{y1}"),    # Jun-Aug
-    ((9, 1), (11, 30), "01.09.{y1} – 30.11.{y1}"),   # Sep-Nov
-]
-
-# Receipt patterns for detecting invoice emails
-RECEIPT_SENDERS = [
-    "receipt", "invoice", "order", "payment", "billing",
-    "paypal", "stripe", "square", "shopify", "gocardless",
-    "amazon.co.uk", "amazon.com", "apple.com",
-    "vercel.com", "github.com", "digitalocean",
-    "godaddy", "namecheap", "cloudflare", "netlify",
-    "adobe", "microsoft", "google.com", "openai.com",
-    "anthropic.com", "notion.so", "figma.com", "canva.com",
-    "zoom.us", "slack.com", "dropbox.com",
-    "envato", "creative-tim", "gumroad", "paddle.com",
-    "xero.com", "quickbooks", "freshbooks",
-    "uber.com", "deliveroo", "justeat",
-    "vodafone", "ee.co.uk", "three.co.uk", "bt.com",
-    "british-gas", "octopus.energy", "bulb.co.uk",
-    "hmrc.gov.uk", "companieshouse",
-]
-
-RECEIPT_SUBJECTS = [
-    "receipt", "invoice", "order confirmation", "payment",
-    "your order", "purchase", "transaction", "statement",
-    "billing", "subscription", "renewal", "charge",
-    "payment received", "payment confirmation",
-]
-
-# Attachment types to save
-ALLOWED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp']
-
 
 def load_credentials() -> dict:
     """Load OAuth credentials from file."""
@@ -205,41 +159,6 @@ def drive_api_request(endpoint: str, method: str = "GET", body: dict = None, raw
         return {}
 
 
-def file_exists_in_folder(original_filename: str, folder_id: str) -> bool:
-    """
-    Check if a file with this original filename already exists in the folder.
-    Uses the base filename (without date prefix) to catch duplicates regardless of sender name.
-    """
-    token = get_access_token()
-
-    # Extract just the original filename part (e.g., "5450626754.pdf" from various formats)
-    base_name = os.path.basename(original_filename)
-    # Escape single quotes in filename to prevent Drive API query injection
-    base_name_escaped = base_name.replace("\\", "\\\\").replace("'", "\\'")
-
-    # Search for files containing this filename in the folder
-    query = f"'{folder_id}' in parents and name contains '{base_name_escaped}' and trashed = false"
-    params = urllib.parse.urlencode({
-        "q": query,
-        "fields": "files(id,name)"
-    })
-
-    url = f"https://www.googleapis.com/drive/v3/files?{params}"
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", f"Bearer {token}")
-
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read())
-            files = result.get("files", [])
-            if files:
-                return True
-    except Exception as e:
-        print(f"Error checking for existing file: {e}")
-
-    return False
-
-
 def upload_to_drive(file_data: bytes, filename: str, folder_id: str, mime_type: str) -> Optional[str]:
     """Upload a file to Google Drive."""
     token = get_access_token()
@@ -314,45 +233,8 @@ def get_attachment(message_id: str, attachment_id: str) -> Optional[bytes]:
 
 
 def find_attachments(message: dict) -> List[dict]:
-    """Find all attachments in a message."""
-    attachments = []
-
-    def scan_parts(parts: list, depth=0):
-        for part in parts:
-            filename = part.get("filename", "")
-            body = part.get("body", {})
-            attachment_id = body.get("attachmentId")
-
-            if filename and attachment_id:
-                ext = os.path.splitext(filename.lower())[1]
-                if ext in ALLOWED_EXTENSIONS:
-                    attachments.append({
-                        "filename": filename,
-                        "attachment_id": attachment_id,
-                        "mime_type": part.get("mimeType", "application/octet-stream"),
-                        "size": body.get("size", 0)
-                    })
-
-            # Recurse into nested parts
-            if "parts" in part:
-                scan_parts(part["parts"], depth + 1)
-
-    payload = message.get("payload", {})
-    if "parts" in payload:
-        scan_parts(payload["parts"])
-
-    return attachments
-
-
-def matches_pattern(text: str, patterns: List[str]) -> bool:
-    """Check if text matches any pattern (case insensitive)."""
-    text_lower = text.lower()
-    return any(p.lower() in text_lower for p in patterns)
-
-
-def is_receipt_email(from_addr: str, subject: str) -> bool:
-    """Check if this is a receipt/invoice email."""
-    return matches_pattern(from_addr, RECEIPT_SENDERS) or matches_pattern(subject, RECEIPT_SUBJECTS)
+    """Use the same evidence and inline-image rules as the realtime collector."""
+    return financial_attachments(message)
 
 
 def get_quarterly_folder(date: datetime) -> Tuple[str, str]:
@@ -384,6 +266,9 @@ def get_quarterly_folder(date: datetime) -> Tuple[str, str]:
     # Find or create year folder
     year_folder_id = find_or_create_folder(str(year_for_folder), VAT_FOLDER_ID)
 
+    if not year_folder_id:
+        raise RuntimeError("Missing financial year folder")
+
     # Find or create quarterly folder
     quarter_folder_id = find_or_create_folder(period_name, year_folder_id)
 
@@ -410,8 +295,8 @@ def find_folder(name: str, parent_id: str) -> Optional[str]:
             files = result.get("files", [])
             if files:
                 return files[0]["id"]
-    except Exception as e:
-        print(f"Error finding folder: {e}")
+    except (OSError, ValueError) as error:
+        raise RuntimeError("Financial folder lookup failed") from error
 
     return None
 
@@ -520,7 +405,7 @@ def send_telegram(message: str) -> bool:
     try:
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10):
             return True
     except Exception as e:
         print(f"Telegram error: {e}")
@@ -565,10 +450,6 @@ def archive_receipt_emails(days_back: int = 7, verbose: bool = False):
         subject = headers.get("subject", "")
         date_str = headers.get("date", "")
 
-        # Verify it's a receipt email
-        if not is_receipt_email(from_addr, subject):
-            continue
-
         # Find attachments
         attachments = find_attachments(message)
         if not attachments:
@@ -586,49 +467,21 @@ def archive_receipt_emails(days_back: int = 7, verbose: bool = False):
             print(f"  Date: {email_date.strftime('%Y-%m-%d')}")
             print(f"  Attachments: {len(attachments)}")
 
-        # Upload each attachment
-        all_succeeded = True
-        for att in attachments:
-            filename = att["filename"]
+        sender = re.sub(r"[^\w\s-]", "", from_addr.split("<")[0]).strip()[:30]
 
-            # Check if this file already exists in the target folder (by original filename)
-            # This prevents duplicates even if sender name parsing differs
-            if file_exists_in_folder(filename, quarter_folder_id):
-                if verbose:
-                    print(f"  ⏭ Skipping (already in Drive): {filename}")
-                continue
+        def filename(attachment: dict) -> str:
+            name = f"{email_date:%Y-%m-%d} - {sender} - {attachment['filename']}"
+            return re.sub(r"\s+", " ", name)
 
-            # Prefix with date for easy sorting
-            date_prefix = email_date.strftime("%Y-%m-%d")
-
-            # Clean the sender for filename
-            sender_clean = re.sub(r'[<>@"\']', '', from_addr.split('<')[0]).strip()[:30]
-            sender_clean = re.sub(r'[^\w\s-]', '', sender_clean).strip()
-
-            # Build new filename
-            base, ext = os.path.splitext(filename)
-            new_filename = f"{date_prefix} - {sender_clean} - {base}{ext}"
-            new_filename = re.sub(r'\s+', ' ', new_filename)  # Clean whitespace
-
-            if verbose:
-                print(f"  Uploading: {new_filename}")
-
-            # Download attachment
-            file_data = get_attachment(msg_id, att["attachment_id"])
-            if not file_data:
-                print(f"  Failed to download: {filename}")
-                all_succeeded = False
-                continue
-
-            # Upload to Drive
-            file_id = upload_to_drive(file_data, new_filename, quarter_folder_id, att["mime_type"])
-            if file_id:
-                uploaded_count += 1
-                if verbose:
-                    print(f"  ✓ Uploaded: {new_filename}")
-            else:
-                print(f"  ✗ Failed to upload: {new_filename}")
-                all_succeeded = False
+        result = archive_files(
+            attachments, quarter_folder_id,
+            f"/opt/claudius/state/financial_archive_{_ACCOUNT.state_prefix}.lock",
+            get_access_token,
+            lambda attachment: get_attachment(msg_id, attachment["attachment_id"]),
+            upload_to_drive, filename,
+        )
+        uploaded_count += len(result["saved"])
+        all_succeeded = not result["failed"]
 
         # Only mark as archived if ALL attachments processed successfully
         if all_succeeded:
@@ -659,7 +512,7 @@ def main():
         if arg.startswith("--days="):
             try:
                 days = int(arg.split("=")[1])
-            except:
+            except ValueError:
                 pass
 
     if "--backfill" in sys.argv:
