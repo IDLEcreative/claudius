@@ -23,20 +23,22 @@ import json
 import os
 import re
 import sys
-import argparse
+import fcntl
 import base64
 import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Tuple, Any
+from typing import Optional, List
 from pathlib import Path
 
 # Add parent dir to path for lib imports
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.config import AccountConfig
-from lib.telegram_sender import send_telegram as _send_telegram
+from lib.financial_attachments import financial_attachments
+from lib.financial_archive import archive_files
+from lib.telegram_sender import _ensure_env
 
 # =============================================================================
 # CONFIGURATION (loaded from --account flag or default)
@@ -60,16 +62,12 @@ LEARNED_SENDERS_FILE = f"/opt/claudius/state/email_learned_senders_{_ACCOUNT.sta
 USER_EMAIL = _ACCOUNT.email
 
 # Telegram config (from .env via lib)
-from lib.telegram_sender import _ensure_env
 _ensure_env()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # Drive folder for invoices
 VAT_FOLDER_ID = _ACCOUNT.vat_folder_id
-
-# Allowed attachment types for auto-save
-ALLOWED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp']
 
 # =============================================================================
 # EMAIL CLASSIFICATION RULES
@@ -82,31 +80,6 @@ PRIORITY_SENDERS = [
     "@anthropic.com",  # Important for business
     "hmrc.gov.uk",     # Tax office!
     "companieshouse",  # Legal requirements
-]
-
-# Invoice/Receipt patterns - save to Drive
-INVOICE_SENDERS = [
-    "receipt", "invoice", "order", "payment", "billing",
-    "paypal", "stripe", "square", "shopify", "gocardless",
-    "amazon.co.uk", "amazon.com", "apple.com",
-    "vercel.com", "github.com", "digitalocean",
-    "godaddy", "namecheap", "cloudflare", "netlify",
-    "adobe", "microsoft", "google.com", "openai.com",
-    "anthropic.com", "notion.so", "figma.com", "canva.com",
-    "zoom.us", "slack.com", "dropbox.com",
-    "envato", "creative-tim", "gumroad", "paddle.com",
-    "xero.com", "quickbooks", "freshbooks",
-    "uber.com", "deliveroo", "justeat",
-    "vodafone", "ee.co.uk", "three.co.uk", "bt.com",
-    "british-gas", "octopus.energy", "bulb.co.uk",
-    "hetzner",
-]
-
-INVOICE_SUBJECTS = [
-    "receipt", "invoice", "order confirmation", "payment",
-    "your order", "purchase", "transaction", "statement",
-    "billing", "subscription", "renewal", "charge",
-    "payment received", "payment confirmation",
 ]
 
 # Build failure patterns - alert with lower priority
@@ -311,33 +284,8 @@ def get_message_body(message: dict) -> str:
 
 
 def find_attachments(message: dict) -> List[dict]:
-    """Find all downloadable attachments in a message."""
-    attachments = []
-
-    def scan_parts(parts: list):
-        for part in parts:
-            filename = part.get("filename", "")
-            body = part.get("body", {})
-            attachment_id = body.get("attachmentId")
-
-            if filename and attachment_id:
-                ext = os.path.splitext(filename.lower())[1]
-                if ext in ALLOWED_EXTENSIONS:
-                    attachments.append({
-                        "filename": filename,
-                        "attachment_id": attachment_id,
-                        "mime_type": part.get("mimeType", "application/octet-stream"),
-                        "size": body.get("size", 0)
-                    })
-
-            if "parts" in part:
-                scan_parts(part["parts"])
-
-    payload = message.get("payload", {})
-    if "parts" in payload:
-        scan_parts(payload["parts"])
-
-    return attachments
+    """Select financial evidence without treating every vendor/VIP file as a receipt."""
+    return financial_attachments(message)
 
 
 def get_attachment(message_id: str, attachment_id: str) -> Optional[bytes]:
@@ -413,7 +361,7 @@ def classify_email(headers: dict, body: str, attachments: List[dict]) -> EmailCl
         return EmailClassification(
             EmailClassification.PRIORITY_ALERT,
             1.0,
-            f"Priority sender"
+            "Priority sender"
         )
 
     # 1b. Learned priority senders (people you reply to frequently)
@@ -421,26 +369,13 @@ def classify_email(headers: dict, body: str, attachments: List[dict]) -> EmailCl
         return EmailClassification(
             EmailClassification.PRIORITY_ALERT,
             0.9,
-            f"Learned priority (frequent replies)"
+            "Learned priority (frequent replies)"
         )
 
-    # 2. Invoice/Receipt detection
-    is_invoice_sender = matches_pattern(from_addr, INVOICE_SENDERS)
-    is_invoice_subject = matches_pattern(subject, INVOICE_SUBJECTS)
-    has_pdf = any(a["filename"].lower().endswith(".pdf") for a in attachments)
-
-    if is_invoice_sender and (is_invoice_subject or has_pdf):
+    # 2. Financial attachments require subject/filename evidence, not sender alone.
+    if attachments:
         return EmailClassification(
-            EmailClassification.INVOICE,
-            0.95,
-            f"Invoice from {from_addr.split('@')[0] if '@' in from_addr else from_addr[:20]}"
-        )
-
-    if is_invoice_subject and has_pdf:
-        return EmailClassification(
-            EmailClassification.INVOICE,
-            0.85,
-            "Invoice subject + PDF attachment"
+            EmailClassification.INVOICE, 0.85, "Financial attachment candidate"
         )
 
     # 3. Build failures
@@ -517,7 +452,7 @@ def send_telegram_alert(message: str, parse_mode: str = "Markdown") -> bool:
     try:
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10):
             return True
     except Exception as e:
         print(f"[Telegram] Error: {e}")
@@ -560,8 +495,8 @@ def get_quarterly_folder(date: datetime) -> str:
                 files = result.get("files", [])
                 if files:
                     return files[0]["id"]
-        except:
-            pass
+        except (OSError, ValueError) as error:
+            raise RuntimeError("Financial folder lookup/create failed") from error
         return None
 
     def create_folder(name: str, parent_id: str) -> Optional[str]:
@@ -579,14 +514,17 @@ def get_quarterly_folder(date: datetime) -> str:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 result = json.loads(resp.read())
                 return result.get("id")
-        except:
-            pass
+        except (OSError, ValueError) as error:
+            raise RuntimeError("Financial folder lookup/create failed") from error
         return None
 
     # Find/create year folder
     year_folder_id = find_folder(str(year_for_folder), VAT_FOLDER_ID)
     if not year_folder_id:
         year_folder_id = create_folder(str(year_for_folder), VAT_FOLDER_ID)
+
+    if not year_folder_id:
+        raise RuntimeError("Missing financial year folder")
 
     # Find/create quarterly folder
     quarter_folder_id = find_folder(period_name, year_folder_id)
@@ -598,47 +536,23 @@ def get_quarterly_folder(date: datetime) -> str:
 
 def action_save_to_drive(message: dict, headers: dict, attachments: List[dict]) -> dict:
     """Save invoice/receipt attachments to Drive."""
-    results = {"saved": [], "failed": []}
-
     if not attachments:
-        return results
-
-    # Get email date for folder selection
+        return {"saved": [], "duplicate": [], "failed": []}
     email_date = parse_email_date(headers.get("date", ""))
-    folder_id = get_quarterly_folder(email_date)
-
-    if not folder_id:
-        results["failed"] = [a["filename"] for a in attachments]
-        return results
-
-    # Clean sender name for filename
     from_addr = headers.get("from", "")
-    sender_clean = re.sub(r'[<>@"\']', '', from_addr.split('<')[0]).strip()[:30]
-    sender_clean = re.sub(r'[^\w\s-]', '', sender_clean).strip()
+    sender = re.sub(r"[^\w\s-]", "", from_addr.split("<")[0]).strip()[:30]
 
-    date_prefix = email_date.strftime("%Y-%m-%d")
+    def filename(attachment: dict) -> str:
+        name = f"{email_date:%Y-%m-%d} - {sender} - {attachment['filename']}"
+        return re.sub(r"\s+", " ", name)
 
-    for att in attachments:
-        filename = att["filename"]
-
-        # Build new filename
-        base, ext = os.path.splitext(filename)
-        new_filename = f"{date_prefix} - {sender_clean} - {base}{ext}"
-        new_filename = re.sub(r'\s+', ' ', new_filename)
-
-        # Download and upload
-        file_data = get_attachment(message.get("id"), att["attachment_id"])
-        if not file_data:
-            results["failed"].append(filename)
-            continue
-
-        file_id = drive_upload_multipart(file_data, new_filename, folder_id, att["mime_type"])
-        if file_id:
-            results["saved"].append(new_filename)
-        else:
-            results["failed"].append(filename)
-
-    return results
+    return archive_files(
+        attachments, lambda: get_quarterly_folder(email_date),
+        f"/opt/claudius/state/financial_archive_{_ACCOUNT.state_prefix}.lock",
+        get_access_token,
+        lambda attachment: get_attachment(message["id"], attachment["attachment_id"]),
+        drive_upload_multipart, filename,
+    )
 
 
 def action_quick_invoice_alert(headers: dict, body: str, save_result: dict) -> bool:
@@ -767,7 +681,6 @@ def action_telegram_alert(headers: dict, body: str, classification: EmailClassif
 # MAIN ROUTER
 # =============================================================================
 
-import fcntl
 _state_lock_fd = None
 
 
@@ -827,7 +740,7 @@ def load_learned_senders() -> dict:
     try:
         with open(LEARNED_SENDERS_FILE) as f:
             return json.load(f)
-    except:
+    except (FileNotFoundError, json.JSONDecodeError):
         return {"priority_senders": {}, "last_scan": None}
 
 
@@ -916,7 +829,8 @@ def route_email(message: dict) -> dict:
         "subject": headers.get("subject", "")[:50],
         "classification": classification.category,
         "confidence": classification.confidence,
-        "actions_taken": []
+        "actions_taken": [],
+        "retry_required": False
     }
 
     # Route based on classification
@@ -929,6 +843,7 @@ def route_email(message: dict) -> dict:
             if action_quick_invoice_alert(headers, body, save_result):
                 result["actions_taken"].append("Quick invoice alert sent")
         if save_result["failed"]:
+            result["retry_required"] = True
             result["actions_taken"].append(f"Failed to save {len(save_result['failed'])} files")
 
     elif classification.category == EmailClassification.PRIORITY_ALERT:
@@ -936,9 +851,10 @@ def route_email(message: dict) -> dict:
         if action_telegram_alert(headers, body, classification, attachments):
             result["actions_taken"].append("Priority Telegram alert sent")
 
-        # Also save any attachments
+        # VIP status does not make a file financial; attachments are already filtered.
         if attachments:
             save_result = action_save_to_drive(message, headers, attachments)
+            result["retry_required"] = bool(save_result["failed"])
             if save_result["saved"]:
                 result["actions_taken"].append(f"Saved {len(save_result['saved'])} files to Drive")
 
@@ -1003,8 +919,9 @@ def process_new_emails(verbose: bool = False):
             for action in result['actions_taken']:
                 print(f"         -> {action}")
 
-        # Mark as processed
-        processed_ids.add(msg_id)
+        # Failed filings remain eligible for the next polling attempt.
+        if not result["retry_required"]:
+            processed_ids.add(msg_id)
 
     # Save state
     state["last_check"] = datetime.now(timezone.utc).isoformat()
@@ -1049,7 +966,7 @@ def setup_gmail_watch(topic_name: str = None) -> dict:
     result = gmail_api_request("watch", method="POST", body=body)
 
     if result:
-        print(f"[Watch] Gmail watch set up successfully")
+        print("[Watch] Gmail watch set up successfully")
         print(f"[Watch] History ID: {result.get('historyId')}")
         print(f"[Watch] Expires: {result.get('expiration')}")
     else:
@@ -1127,7 +1044,8 @@ def process_push_notification(data: dict):
             if message:
                 result = route_email(message)
                 print(f"[Push] Routed: {result['classification']} - {result['subject']}")
-                processed_ids.add(msg_id)
+                if not result["retry_required"]:
+                    processed_ids.add(msg_id)
 
         state["processed_ids"] = list(processed_ids)
 
