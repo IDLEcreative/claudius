@@ -458,9 +458,6 @@ def archive_receipt_emails(days_back: int = 7, verbose: bool = False):
         # Parse date for folder selection
         email_date = parse_email_date(date_str)
 
-        # Get the appropriate quarterly folder
-        _, quarter_folder_id = get_quarterly_folder(email_date)
-
         if verbose:
             print(f"\nProcessing: {subject[:50]}...")
             print(f"  From: {from_addr[:50]}")
@@ -474,7 +471,7 @@ def archive_receipt_emails(days_back: int = 7, verbose: bool = False):
             return re.sub(r"\s+", " ", name)
 
         result = archive_files(
-            attachments, quarter_folder_id,
+            attachments, lambda: get_quarterly_folder(email_date)[1],
             f"/opt/claudius/state/financial_archive_{_ACCOUNT.state_prefix}.lock",
             get_access_token,
             lambda attachment: get_attachment(msg_id, attachment["attachment_id"]),

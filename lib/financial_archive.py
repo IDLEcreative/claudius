@@ -55,7 +55,7 @@ def folder_contents(folder_id: str, token: str) -> set[tuple[str, int]]:
 
 
 def archive_files(
-    attachments: list[dict], folder_id: str, lock_path: str,
+    attachments: list[dict], folder_id: str | Callable[[], str], lock_path: str,
     get_token: Callable[[], str], download: Callable[[dict], bytes | None],
     upload: Callable[[bytes, str, str, str], str | None],
     name_for: Callable[[dict], str],
@@ -77,9 +77,12 @@ collectors must use the same account-scoped lock path on the same host.
     with Path(lock_path).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
+            folder_id = folder_id() if callable(folder_id) else folder_id
+            if not folder_id:
+                raise ValueError("Missing financial archive folder")
             token = get_token()
             existing = folder_contents(folder_id, token)
-            for attachment in attachments:
+            for index, attachment in enumerate(attachments):
                 filename = attachment["filename"]
                 try:
                     if int(attachment.get("size", 0)) > MAX_ATTACHMENT_BYTES:
@@ -104,7 +107,10 @@ collectors must use the same account-scoped lock path on the same host.
                     result["saved"].append(name)
                 except (OSError, ValueError, KeyError, TypeError) as error:
                     print(f"[Financial archive] Attachment failed: {type(error).__name__}")
-                    result["failed"].append(filename)
+                    # A timed-out write may already exist remotely. Stop this batch
+                    # so retry re-reads Drive before considering identical later parts.
+                    result["failed"].extend(a["filename"] for a in attachments[index:])
+                    break
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
     return result

@@ -2,10 +2,15 @@
 
 import importlib.util
 import unittest
+import tempfile
+import hashlib
+import fcntl
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from lib.config import AccountConfig
+from lib.financial_archive import archive_files
 
 
 def load_collector(filename):
@@ -96,6 +101,48 @@ class CollectorTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.router.get_quarterly_folder(self.router.parse_email_date("Mon, 03 Aug 2026 10:00:00 +0000"))
             self.assertEqual(request.call_count, 1)
+
+    def test_concurrent_callers_create_one_destination_and_one_file(self):
+        folders, files = [], []
+        data = b"same invoice"
+        with tempfile.TemporaryDirectory() as temp:
+            lock_path = str(Path(temp) / "account.lock")
+            def resolve(date):
+                # Assert the real collector deferred its lookup until the lock.
+                with open(lock_path, "a") as other:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if not folders:
+                    folders.append("quarter")
+                return folders[0]
+            def file_message(*args):
+                files.append({"md5Checksum": hashlib.md5(data).hexdigest(), "size": str(len(data)),
+                              "parents": ["quarter"], "mimeType": "application/pdf"})
+                return str(len(files))
+            def read(endpoint, token):
+                return {"files": list(files)} if endpoint.startswith("files?") else files[-1]
+            def archive(attachments, folder, lock, token, download, upload, name):
+                return archive_files(attachments, folder, lock_path, lambda: "fake",
+                                     lambda _: data, file_message, name)
+            with patch.object(self.router, "get_quarterly_folder", side_effect=resolve), \
+                    patch.object(self.daily, "get_quarterly_folder", side_effect=lambda date: ("year", resolve(date))), \
+                    patch.object(self.router, "archive_files", side_effect=archive), \
+                    patch.object(self.daily, "archive_files", side_effect=archive), \
+                    patch("lib.financial_archive._read", side_effect=read), \
+                    patch.object(self.daily, "load_state", return_value={"archived_message_ids": []}), \
+                    patch.object(self.daily, "search_messages", return_value=[{"id": "message"}]), \
+                    patch.object(self.daily, "get_message", return_value=invoice()), \
+                    patch.object(self.daily, "save_state"), \
+                    patch.object(self.daily, "send_telegram"):
+                msg = invoice()
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    first = pool.submit(self.router.action_save_to_drive, msg,
+                                        self.router.get_message_headers(msg), self.router.find_attachments(msg))
+                    second = pool.submit(self.daily.archive_receipt_emails)
+                    first.result()
+                    second.result()
+            self.assertEqual(len(folders), 1)
+            self.assertEqual(len(files), 1)
 
 
 if __name__ == "__main__":

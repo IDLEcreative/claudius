@@ -539,7 +539,6 @@ def action_save_to_drive(message: dict, headers: dict, attachments: List[dict]) 
     if not attachments:
         return {"saved": [], "duplicate": [], "failed": []}
     email_date = parse_email_date(headers.get("date", ""))
-    folder_id = get_quarterly_folder(email_date)
     from_addr = headers.get("from", "")
     sender = re.sub(r"[^\w\s-]", "", from_addr.split("<")[0]).strip()[:30]
 
@@ -548,7 +547,7 @@ def action_save_to_drive(message: dict, headers: dict, attachments: List[dict]) 
         return re.sub(r"\s+", " ", name)
 
     return archive_files(
-        attachments, folder_id,
+        attachments, lambda: get_quarterly_folder(email_date),
         f"/opt/claudius/state/financial_archive_{_ACCOUNT.state_prefix}.lock",
         get_access_token,
         lambda attachment: get_attachment(message["id"], attachment["attachment_id"]),

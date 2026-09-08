@@ -139,6 +139,37 @@ class FilingTests(unittest.TestCase):
         self.assertTrue(self.run_archive()["duplicate"])
         self.assertEqual(self.upload_count, 1)
 
+    def test_unknown_upload_stops_identical_later_parts_in_same_batch(self):
+        attachments = [{"filename": name, "mime_type": "application/pdf"}
+                       for name in ("invoice.pdf", "reminder.pdf")]
+        def interrupted_upload(*args):
+            self.upload(*args)
+            raise TimeoutError("lost response")
+        result = self.run_archive(attachments, upload=interrupted_upload)
+        self.assertEqual(result["failed"], ["invoice.pdf", "reminder.pdf"])
+        self.assertEqual(self.upload_count, 1)
+        self.assertEqual(len(self.run_archive(attachments)["duplicate"]), 2)
+
+    def test_unknown_readback_stops_identical_later_parts(self):
+        attachments = [{"filename": "invoice.pdf", "mime_type": "application/pdf"}] * 2
+        def interrupted_read(endpoint, token):
+            if endpoint.startswith("files/"):
+                raise TimeoutError("lost readback")
+            return self.read(endpoint, token)
+        with patch("lib.financial_archive._read", side_effect=interrupted_read):
+            result = self.run_archive(attachments)
+        self.assertEqual(len(result["failed"]), 2)
+        self.assertEqual(self.upload_count, 1)
+
+    def test_destination_resolution_is_under_shared_lock(self):
+        import fcntl
+        def resolve():
+            with open(self.lock, "a") as other:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return "quarter"
+        self.assertTrue(self.run_archive(folder=resolve)["saved"])
+
     def test_missing_folder_does_not_upload(self):
         self.assertTrue(self.run_archive(folder="")["failed"])
         self.assertEqual(self.read_count, 0)

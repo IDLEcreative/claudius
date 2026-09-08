@@ -5,7 +5,9 @@
 Outcome VAT-01: collect financial email attachments without filing unrelated
 vendor reports, losing distinct generic-named invoices, or duplicating content.
 The existing scheduled email router and daily archiver are the active entrypoints.
-Owner, release and cleanup: root task. Independent review: pending.
+Owner, release and cleanup: root task. Independent review: initial review found two blockers (folder resolution outside
+the lock and same-batch retries after uncertain writes). Both now have fixes and
+regression tests; final immutable review is pending.
 Current claim: local candidate; no deployment or live user proof.
 
 The complete requested job also includes outgoing invoices, linked/body-only
@@ -19,7 +21,7 @@ still a filing convenience, not a verified tax point. No VAT calculation is made
   matches alone cannot file attachments. Scanned receipt images remain supported;
   decorative or unnamed inline images are excluded.
 - Root and nested MIME attachment parts are examined.
-- One shared account-specific file lock serialises listing and upload.
+- One shared account-specific file lock serialises folder resolution, listing and upload.
 - Duplicate identity is content checksum and size within the destination folder,
   including existing Drive files. Different documents named `invoice.pdf` survive.
 - Drive lookup failures abort rather than create replacement folders or files.
@@ -36,7 +38,7 @@ replaced, and cover false-positive reports, VIP artwork, inline images, scanned
 receipts, generic filename collisions, legacy duplicates, concurrent collectors,
 partial failures, unknown upload outcomes, pagination and wrong-folder readback.
 Python 3.10 syntax is checked against the deployed interpreter version.
-These are controlled local tests, not real end-to-end proof.
+28 tests pass. These are controlled local tests, not real end-to-end proof.
 
 ## Optimisation and limits
 
@@ -55,8 +57,7 @@ The lock is local-host only. Tests compare 10/100 rows and exercise the page cap
 
 At 2026-09-08 the deployed collector files matched the original tracked source.
 The production checkout contains unrelated local changes; never pull/reset it.
-Repository branch protection returned “Branch not protected”; rulesets must also
-be checked before release. Do not weaken or invent a protected merge path.
+Repository branch protection returned “Branch not protected”; the repository ruleset list was also empty. Do not weaken or invent a protected merge path.
 
 After immutable review and an authorised merge path, deploy only the two helper
 modules and two collector entrypoints, retaining exact original-file backups.
